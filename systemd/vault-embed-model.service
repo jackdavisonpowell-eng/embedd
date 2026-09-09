@@ -1,0 +1,23 @@
+[Unit]
+Description=vault embedder model (nomic-embed-text-v1.5, CPU only)
+After=network.target
+
+[Service]
+Type=simple
+# CPU only, on purpose: the GPUs belong to the brains. This model is 274 MB and
+# never competes with them for VRAM.
+Environment=CUDA_VISIBLE_DEVICES=
+ExecStart=/home/jack/stack/llama.cpp/build70/bin/llama-server \
+  --model /home/jack/stack/models/nomic-embed-text-v1.5.f16.gguf \
+  --embedding --pooling mean \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 \
+  --n-gpu-layers 0 --threads 4 \
+  --host 127.0.0.1 --port 11476 \
+  --log-disable
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target

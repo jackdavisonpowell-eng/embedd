@@ -1,0 +1,19 @@
+[Unit]
+Description=vault embed index + search API (the one index every agent shares)
+After=vault-embed-model.service
+Wants=vault-embed-model.service
+
+[Service]
+Type=simple
+Environment=EMBED_VAULT=/data/vault
+Environment=EMBED_URL=http://127.0.0.1:11476
+Environment=EMBED_PORT=11475
+Environment=EMBED_INTERVAL=300
+ExecStart=/usr/bin/python3 /home/jack/embed/embedd.py
+Restart=always
+RestartSec=5
+Nice=5
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target
