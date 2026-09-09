@@ -11,7 +11,7 @@ ExecStart=/home/jack/stack/llama.cpp/build70/bin/llama-server \
   --model /home/jack/stack/models/nomic-embed-text-v1.5.f16.gguf \
   --embedding --pooling mean \
   --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 \
-  --n-gpu-layers 0 --threads 4 \
+  --n-gpu-layers 0 --threads 3 \
   --host 127.0.0.1 --port 11476 \
   --log-disable
 Restart=always

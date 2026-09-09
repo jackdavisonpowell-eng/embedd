@@ -63,18 +63,31 @@ _lock  = threading.Lock()      # guards _M/_meta swap
 _M: np.ndarray | None = None   # (n, dim) unit-normalised
 _meta: list = []               # parallel [(path, heading, text)]
 _stats = {"chunks": 0, "files": 0, "dim": 0, "last_index": 0.0,
-          "last_pass_s": 0.0, "indexing": False, "error": ""}
+          "last_pass_s": 0.0, "indexing": False, "error": "",
+          "to_index": 0, "done": 0}
 
 
 # ---------------------------------------------------------------- embedding
 
-def embed(texts: list[str]) -> list[list[float]]:
-    """Vectors for `texts`, via the llama.cpp OpenAI-compatible endpoint."""
+def embed(texts: list[str], tries: int = 8) -> list[list[float]]:
+    """Vectors for `texts`, via the llama.cpp OpenAI-compatible endpoint.
+
+    The model server answers 503 for the first half-minute or so while it loads,
+    and systemd may restart it under us, so a call waits rather than failing the
+    whole pass."""
     body = json.dumps({"model": MODEL, "input": texts}).encode()
-    req = urllib.request.Request(EMBED_URL + "/v1/embeddings", data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        out = json.load(r)
+    for attempt in range(tries):
+        req = urllib.request.Request(EMBED_URL + "/v1/embeddings", data=body,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                out = json.load(r)
+            break
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as e:
+            code = getattr(e, "code", None)
+            if attempt == tries - 1 or (code is not None and code not in (500, 502, 503)):
+                raise
+            time.sleep(min(2 * (attempt + 1), 15))
     rows = sorted(out["data"], key=lambda d: d.get("index", 0))
     return [d["embedding"] for d in rows]
 
@@ -123,7 +136,7 @@ def walk() -> list[tuple[str, float]]:
             dirs[:] = []
             continue
         for f in sorted(fs):
-            if f.endswith(".md"):
+            if f.endswith(".md") and not f.startswith("."):
                 p = os.path.join(root, f)
                 try:
                     files.append((os.path.relpath(p, VAULT), os.path.getmtime(p)))
@@ -171,7 +184,11 @@ def index_pass(full: bool = False) -> dict:
         con.execute("DELETE FROM chunks"); con.commit()
     known = {r[0]: r[1] for r in con.execute("SELECT path,MAX(mtime) FROM chunks GROUP BY path")}
     seen, new, changed = set(), 0, 0
-    for rel, mt in walk():
+    todo = walk()
+    _stats["to_index"] = sum(1 for rel, mt in todo
+                             if known.get(rel) is None or abs(known[rel] - mt) >= 1)
+    _stats["done"] = 0
+    for rel, mt in todo:
         seen.add(rel)
         if known.get(rel) is not None and abs(known[rel] - mt) < 1:
             continue
@@ -197,7 +214,16 @@ def index_pass(full: bool = False) -> dict:
             con.execute("INSERT INTO chunks(path,heading,text,mtime,vec) VALUES(?,?,?,?,?)",
                         (rel, h, c, mt, np.asarray(v, dtype=np.float32).tobytes()))
             new += 1
-    gone = [p for p in known if p not in seen]
+        _stats["done"] += 1
+        if _stats["done"] % 25 == 0:
+            con.commit()
+            # Publish as we go: the first pass over a big vault takes hours, and
+            # a search that returns nothing the whole time looks broken.
+            load()
+            log(f"index: {_stats['done']}/{_stats['to_index']} files, {new} chunks")
+    # Dot-files were indexed by an earlier version; drop them on sight.
+    gone = [p for p in known if p not in seen
+            or any(s.startswith(".") for s in p.split(os.sep))]
     for p in gone:
         con.execute("DELETE FROM chunks WHERE path=?", (p,))
     con.commit()
@@ -217,9 +243,10 @@ def indexer() -> None:
             if r["changed_files"] or r["removed_files"]:
                 log(f"index: +{r['new_chunks']} chunks from {r['changed_files']} file(s), "
                     f"-{r['removed_files']} gone, {r['chunks']} total, {r['seconds']}s")
+            time.sleep(INTERVAL)
         except Exception as e:                                    # noqa: BLE001
             log(f"index failed: {type(e).__name__}: {e}")
-        time.sleep(INTERVAL)
+            time.sleep(30)
 
 
 # ---------------------------------------------------------------- search
